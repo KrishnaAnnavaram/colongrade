@@ -9,7 +9,7 @@
 ![Grades](https://img.shields.io/badge/Grades-Mayo_0_%7C_1_%7C_2_%7C_3-1F3864?style=for-the-badge)
 ![Graders](https://img.shields.io/badge/Graders-features_%7C_CNN_%2B_CORAL-2E5FD9?style=for-the-badge)
 ![Metric](https://img.shields.io/badge/Main_metric-QWK-6E86E8?style=for-the-badge)
-![Tests](https://img.shields.io/badge/Tests-21_passing-3DA35B?style=for-the-badge)
+![Tests](https://img.shields.io/badge/Tests-16_passing-3DA35B?style=for-the-badge)
 ![Offline demo](https://img.shields.io/badge/Offline_demo-Yes-F5C542?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-A0399B?style=for-the-badge)
 
@@ -107,7 +107,7 @@ colongrade gives each of these questions its own component and its own tests.
 | Providers | None. All computation is local. ImageNet weights download only with `--pretrained` |
 | Offline mode | Synthetic images, the manifest, both feature graders, the metrics, the model card. The CNN and the GAN need the `torch` extra |
 | Safety | All images, patient-grouped folds, test used once, generated images only in training folds, research-only output |
-| Tests | **21** unit tests (`pytest`). In CI without torch, 16 pass and the torch module (5 tests) skips |
+| Tests | **16** unit tests pass in CI (`pytest`). The torch module (5 tests) skips without the `torch` extra. With the `torch` extra, 21 pass |
 
 ```mermaid
 flowchart LR
@@ -407,8 +407,8 @@ colongrade needs no credentials.
 
 | Validation | Result | Command |
 |---|---|---|
-| Unit tests (all extras) | **21 passed** | `pytest -q` |
-| Unit tests (CI, dev extra only) | **16 passed, 1 skipped** (the torch module with 5 tests) | `pytest -q` |
+| Unit tests (CI installs only `.[dev]`) | **16 passed, 1 skipped** (the torch module with 5 tests) | `pytest -q` |
+| Unit tests with the `torch` extra | **21 passed** | `pip install -e ".[dev,torch]"`, `pytest -q` |
 | Offline demo (synthetic images) | See the table below | `colongrade demo --neural` |
 
 Offline demo on **synthetic drawings**: 40 patients, 480 images (360 trainval in 5 patient-grouped folds, 120 test from 10 other patients), 64 × 64 pixels:
