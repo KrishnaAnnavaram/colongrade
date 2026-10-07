@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Data: images and manifests are never committed (see data/README.md)
+/data/*
+!/data/README.md
+*.db
+*.sqlite
+
+# Runs, checkpoints, models and caches
+/runs/
+/models_out/
+*.bmp
+*.png
+*.jpg
+*.jpeg
+*.zip
+*.csv
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.ckpt
+*.pkl
+*.joblib
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
