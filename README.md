@@ -70,6 +70,7 @@ This README is the **one location that explains all of colongrade**. It gives th
 4. 🔄 [The end-to-end workflow](#4-the-end-to-end-workflow)
    - 4.1 [Full flow](#41-full-flow)
    - 4.2 [The life cycle of one run](#42-the-life-cycle-of-one-run)
+   - 4.3 [Who does which step](#43-who-does-which-step)
 5. 🔵 [The manifest and the images](#5-the-manifest-and-the-images)
 6. 🟢 [The graders](#6-the-graders)
 7. 🟣 [The conditional GAN ablation](#7-the-conditional-gan-ablation)
@@ -135,6 +136,46 @@ flowchart LR
 | Experiment | `src/colongrade/experiment.py` | Cross-validation, final model, test, permutation importance, model card, prediction |
 | CLI | `src/colongrade/cli.py` | The `colongrade` command |
 
+The component map shows which module calls which module. An arrow points from the caller to the module that it uses.
+
+```mermaid
+flowchart TB
+    subgraph ENTRY["Entry point"]
+        CLI["cli.py<br/>colongrade command"]
+        CFG["config.py<br/>load_settings"]
+    end
+    subgraph DATA["data/"]
+        SYN["synthetic.py<br/>write_dataset"]
+        MAN["manifest.py<br/>build_manifest, assign_folds,<br/>check_manifest"]
+        IMG["images.py<br/>load_image, equalize, clahe"]
+        LAB["labels.py<br/>parse_grade, is_grade_folder"]
+    end
+    subgraph EXPG["Experiment"]
+        EXP["experiment.py<br/>run, predict_file, model_card"]
+        FEAT["features.py<br/>extract, extract_many"]
+        EVA["evaluate.py<br/>qwk, report"]
+    end
+    subgraph MODELS["models/"]
+        BASE["baseline.py<br/>MultinomialGrader, OrdinalGrader"]
+        CNN["cnn.py<br/>CNNGrader, CoralHead<br/>torch extra"]
+        GAN["cgan.py<br/>ConditionalGAN<br/>torch extra"]
+    end
+
+    CLI --> CFG
+    CLI --> SYN
+    CLI --> MAN
+    CLI --> EXP
+    MAN --> LAB
+    EXP --> IMG
+    EXP --> FEAT
+    EXP --> EVA
+    EXP --> BASE
+    EXP --> CNN
+    EXP --> GAN
+    CNN --> EVA
+    GAN --> IMG
+```
+
 ### 2.2 System context
 
 ```mermaid
@@ -176,6 +217,25 @@ colongrade/
 ### 3.2 Validation on held-out folds
 Each fold model trains on the other folds and validates on its own fold. The final model trains on all trainval images and scores the test split one time.
 
+The diagram shows which images each step sees.
+
+```mermaid
+flowchart LR
+    MAN[/"manifest.csv"/] --> TV["trainval images<br/>with a fold number"]
+    MAN --> TE["test images<br/>fold -1"]
+    TV --> TRF["training folds<br/>all folds except k"]
+    TV --> HO["held-out fold k"]
+    TRF --> GAN["optional: ConditionalGAN<br/>fit and sample"]
+    GAN --> FIT["fit grader"]
+    TRF --> FIT
+    HO --> VAL["validate: QWK, macro-F1,<br/>CNN early stopping"]
+    FIT --> VAL
+    TV --> FIN["final grader<br/>on all trainval"]
+    FIN --> ONCE["score the test split<br/>one time"]
+    TE --> ONCE
+    ONCE --> OUT[/"result.json test report"/]
+```
+
 ### 3.3 Patients stay together
 If the folders give a patient, the folds are grouped by patient. `check_manifest` stops the run if a patient or an identical file occurs in trainval and test.
 
@@ -201,20 +261,62 @@ The conditional GAN uses the real grades, trains on the training folds of each s
 ### 4.1 Full flow
 
 ```mermaid
-flowchart TB
-    F["image folders"] --> M["manifest: grade, split, patient, hash"]
+flowchart TD
+    SRC{"Image source"} -- "synth or demo" --> SYN["synthetic.write_dataset:<br/>drawn images with Mayo cues"]
+    SRC -- "LIMUC download" --> F[/"image folders<br/>Mayo 0 to Mayo 3"/]
+    SYN --> F
+    F --> M["manifest: grade, split, patient, hash"]
     M --> FO["grouped stratified folds on trainval"]
-    FO --> CV["for each fold: train on other folds"]
-    CV --> GAN["optional: conditional GAN on training folds"]
-    GAN --> FIT["fit grader"]
-    CV --> FIT
+    FO --> CHK{"check_manifest:<br/>leak found?"}
+    CHK -- "yes" --> ERR[/"ManifestError"/]
+    CHK -- "no" --> MS[("manifest.csv")]
+    MS --> CV["for each fold: train on other folds"]
+    CV --> GQ{"--gan-per-grade above 0?"}
+    GQ -- "yes" --> GAN["optional: conditional GAN on training folds"]
+    GQ -- "no" --> FIT["fit grader"]
+    GAN --> FIT
     FIT --> VAL["validate on held-out fold: QWK, macro-F1"]
     VAL --> FIN["final grader on all trainval"]
     FIN --> TEST["test split once: full report"]
-    TEST --> CARD["result.json + model card + predictions"]
+    TEST --> CARD[("runs/name/<br/>result.json + model card + predictions")]
+    CARD --> PRED["colongrade predict"]
+    NEW[/"new image"/] --> PRED
+    PRED --> OUT[/"predicted_mayo, probabilities,<br/>p_active_disease, research note"/]
+    OUT --> HUMAN{{"HUMAN<br/>a clinician reviews the image and the grade"}}
+
+    classDef human fill:#fff3cd,stroke:#b8901f,color:#3d2f00,font-weight:bold
+    class HUMAN human
 ```
 
 ### 4.2 The life cycle of one run
+
+```mermaid
+stateDiagram-v2
+    state "Manifest loaded" as Manifest
+    state "ExperimentConfig" as Config
+    state "Trainval images loaded" as Loaded
+    state "Fold k fitted" as FoldFit
+    state "Fold k validated" as FoldVal
+    state "Cross-validation summary" as CV
+    state "Final grader fitted" as Final
+    state "Test split scored once" as Tested
+    state "Run folder written" as Written
+    [*] --> Manifest: load_manifest
+    Manifest --> ManifestError: check_manifest finds a leak
+    Manifest --> Config: train arguments
+    Config --> ValueError: model not in MODELS, or fold -1 in trainval
+    Config --> Loaded: load_images with one ImageConfig
+    Loaded --> FoldFit: train on the other folds
+    FoldFit --> FoldVal: report on the held-out fold
+    FoldVal --> FoldFit: next fold
+    FoldVal --> CV: all folds done
+    CV --> Final: CNN epochs are the median best epoch
+    Final --> Tested: report with n_boot bootstrap
+    Tested --> Written: model, config.json, result.json, model_card.md, test_predictions.csv
+    Written --> [*]
+    ManifestError --> [*]
+    ValueError --> [*]
+```
 
 1. `manifest` lists all images and assigns the folds. It checks for leaks.
 2. `train` loads all trainval images with one `ImageConfig`.
@@ -225,11 +327,66 @@ flowchart TB
 7. The final grader scores the test split one time.
 8. The run writes the results, the predictions, the model and the model card.
 
+### 4.3 Who does which step
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor R as Researcher
+    participant CLI as colongrade CLI
+    participant MAN as data/manifest.py
+    participant EXP as experiment.run
+    participant G as Grader
+    participant EV as evaluate.report
+    participant FS as runs/name folder
+    actor C as Clinician
+
+    R->>CLI: colongrade manifest data/LIMUC
+    CLI->>MAN: build_manifest, assign_folds
+    MAN->>MAN: check_manifest
+    MAN-->>CLI: manifest.csv and counts
+    R->>CLI: colongrade train data/LIMUC
+    CLI->>MAN: load_manifest
+    CLI->>EXP: run(manifest, root, cfg, out_dir)
+    loop each fold k
+        EXP->>G: fit on the other folds
+        EXP->>G: predict_proba on fold k
+        EXP->>EV: report, QWK and macro-F1
+    end
+    EXP->>G: fit on all trainval
+    EXP->>G: predict_proba on the test split, one time
+    EXP->>EV: report with bootstrap
+    EXP->>FS: model, config.json, result.json, model_card.md, test_predictions.csv
+    CLI-->>R: cross-validation and test summary
+    R->>CLI: colongrade predict run image
+    CLI->>FS: predict_file reads config.json and the model
+    CLI-->>R: predicted_mayo, probabilities, research note
+    R->>C: research output for review
+```
+
 ---
 
 ## 5. The manifest and the images
 
 **Purpose.** Give every grader all images, with leak-free folds and one image path.
+
+```mermaid
+flowchart TD
+    ROOT[/"root folder"/] --> FIND["rglob: files with .bmp, .png,<br/>.jpg, .jpeg, .tif, .tiff"]
+    FIND --> GD{"A parent folder is<br/>a Mayo grade?"}
+    GD -- "no" --> SKIP["skip the file"]
+    GD -- "yes" --> READ["mayo from the nearest grade folder<br/>split: test in the top folder name, else trainval<br/>patient from a number or patient_number folder"]
+    READ --> HASH["SHA-1 content_hash"]
+    HASH --> ANY{"Any graded image?"}
+    ANY -- "no" --> ERR1[/"ManifestError"/]
+    ANY -- "yes" --> PK{"All trainval rows<br/>have a patient?"}
+    PK -- "yes" --> SGK["StratifiedGroupKFold<br/>grouped by patient"]
+    PK -- "no" --> SK["StratifiedKFold"]
+    SGK --> CHK{"check_manifest: duplicate id,<br/>shared patient, shared file,<br/>patient in two folds?"}
+    SK --> CHK
+    CHK -- "yes" --> ERR2[/"ManifestError"/]
+    CHK -- "no" --> OUT[/"manifest.csv<br/>test rows have fold -1"/]
+```
 
 | Input | Output |
 |---|---|
@@ -254,11 +411,39 @@ flowchart TB
 | `equalize` | Global histogram equalization of the luminance, colour ratios kept |
 | `clahe` | Tile equalization of the luminance with a clip limit of 2.0 and 8 × 8 tiles, bilinear blending |
 
+```mermaid
+flowchart LR
+    P[/"image path and ImageConfig"/] --> OPEN["load_image:<br/>PIL Image.open"]
+    OPEN --> RGB["to_array: convert to RGB,<br/>resize, bilinear"]
+    RGB --> F["float32 in 0 to 1"]
+    F --> C{"contrast"}
+    C -- "none" --> OUT[/"RGB array H, W, 3"/]
+    C -- "equalize" --> EQ["equalize: global histogram<br/>of the luminance"]
+    C -- "clahe" --> CL["clahe: 8 × 8 tiles, clip 2.0,<br/>bilinear blending"]
+    EQ --> AL["_apply_luma: scale R, G and B<br/>by new luma / old luma"]
+    CL --> AL
+    AL --> OUT
+```
+
 ---
 
 ## 6. The graders
 
 **Purpose.** Give each image four grade probabilities.
+
+```mermaid
+flowchart LR
+    IMG[/"RGB images"/] --> EX["features.extract_many:<br/>36 features"]
+    EX --> M{"--model"}
+    M -- "features-multinomial" --> MN["StandardScaler +<br/>LogisticRegression,<br/>class_weight balanced"]
+    M -- "features-ordinal" --> OR["StandardScaler +<br/>3 LogisticRegression models<br/>for P of grade above k,<br/>balanced sample weights"]
+    OR --> MONO["minimum.accumulate:<br/>keep the 3 values ordered"]
+    MONO --> DIFF["differences give<br/>4 grade probabilities"]
+    MN --> OUT[/"probabilities of Mayo 0 to 3"/]
+    DIFF --> OUT
+    IMG --> CNN["cnn-small, cnn-resnet18,<br/>cnn-resnet50: CNNGrader"]
+    CNN --> OUT
+```
 
 | Grader | Input | Method | Imbalance |
 |---|---|---|---|
@@ -269,6 +454,22 @@ flowchart TB
 
 **Features.** Mean, SD and percentiles of R, G and B. Mean and SD of hue, saturation and value. Redness `R / (R + G + B)`. Red minus green. Brightness-independent gradient statistics (vessel pattern). The share of bright, pale spots (fibrin). The share of dark red spots (bleeding). An 8-bin hue histogram.
 
+```mermaid
+flowchart LR
+    IN[/"RGB image in 0 to 1"/] --> RGBS["R, G and B: mean, SD,<br/>p10, p50, p90<br/>15 features"]
+    IN --> HSV["_hsv: hue, sat, val<br/>mean and SD, 6 features"]
+    IN --> RED["redness: mean, p90<br/>red_minus_green, 3 features"]
+    IN --> GR["gradient of luma / mean luma<br/>grad_mean, grad_p90"]
+    IN --> SP["bright_spot_share: fibrin<br/>dark_red_share: bleeding"]
+    HSV --> HH["hue_hist_0 to hue_hist_7"]
+    RGBS --> V[/"feature vector, 36 values"/]
+    HSV --> V
+    RED --> V
+    GR --> V
+    SP --> V
+    HH --> V
+```
+
 **CNN procedure**
 
 1. Normalize with the ImageNet mean and SD.
@@ -277,6 +478,29 @@ flowchart TB
 4. After each epoch, compute the validation QWK and keep a deep copy of the best weights.
 5. Stop after more than 4 epochs with no improvement.
 
+```mermaid
+flowchart TD
+    IN[/"training images and grades"/] --> BB{"backbone"}
+    BB -- "small" --> SM["SmallBackbone:<br/>4 residual blocks, from scratch"]
+    BB -- "resnet18 or resnet50" --> RN["torchvision ResNet,<br/>ImageNet weights with --pretrained"]
+    SM --> HEAD["OrdinalCNN: pool +<br/>CoralHead, 3 thresholds"]
+    RN --> HEAD
+    HEAD --> EP["epoch: shuffle, ImageNet normalization,<br/>_augment: flips and 90-degree turns"]
+    EP --> LOSS["grade-weighted BCE on coral_targets,<br/>AdamW step"]
+    LOSS --> HV{"Validation fold given?"}
+    HV -- "no, final model" --> MORE{"Epochs left?"}
+    HV -- "yes" --> Q["QWK on the validation fold"]
+    Q --> BEST{"Better than the best?"}
+    BEST -- "yes" --> COPY["deepcopy of state_dict,<br/>best_epoch = epoch"]
+    BEST -- "no" --> PAT{"More than 4 epochs<br/>with no improvement?"}
+    COPY --> MORE
+    PAT -- "no" --> MORE
+    PAT -- "yes" --> LOAD["load the best weights, if any"]
+    MORE -- "yes" --> EP
+    MORE -- "no" --> LOAD
+    LOAD --> OUT[/"coral_proba:<br/>4 grade probabilities"/]
+```
+
 `CNNGrader.grad_cam` gives a Grad-CAM map for one image, for a visual review.
 
 ---
@@ -284,6 +508,22 @@ flowchart TB
 ## 7. The conditional GAN ablation
 
 **Purpose.** Test whether generated images help, in a fair way.
+
+```mermaid
+flowchart TD
+    TR[/"training-fold images<br/>and real grades"/] --> SC["scale pixels to -1 to 1"]
+    SC --> LOOP["one epoch: one pass,<br/>batches of 32"]
+    LOOP --> GEN["Generator: 64 noise values +<br/>grade embedding, tanh"]
+    GEN --> DIS["Discriminator: projection<br/>of the grade embedding"]
+    DIS --> DL["D loss: real to 0.9, fake to 0,<br/>Adam step"]
+    DL --> GL["G loss: fake to 1, Adam step"]
+    GL --> MORE{"--gan-epochs done?"}
+    MORE -- "no" --> LOOP
+    MORE -- "yes" --> SAMP["sample: --gan-per-grade images<br/>for each grade 0 to 3"]
+    SAMP --> U8["tanh_to_uint8:<br/>x + 1, times 127.5"]
+    U8 --> ADD["divide by 255, add to the<br/>training images with their grades"]
+    ADD --> FIT[/"fit the grader"/]
+```
 
 | Item | Value |
 |---|---|
@@ -302,6 +542,27 @@ flowchart TB
 ---
 
 ## 8. The metrics and the model card
+
+`evaluate.report` changes the true grades and the grade probabilities into one report. The run writes the report to `result.json` and to the model card.
+
+```mermaid
+flowchart LR
+    Y[/"true grades"/] --> CM["confusion_matrix 4 × 4"]
+    P[/"grade probabilities"/] --> AM["argmax: predicted grade"]
+    AM --> CM
+    AM --> QWK["qwk + bootstrap qwk_ci95"]
+    AM --> F1["macro_f1, accuracy,<br/>mae_grades"]
+    CM --> REC["per_grade_recall"]
+    P --> ECE["ece: top-grade confidence,<br/>10 bins"]
+    Y --> ACT{"Remission and active<br/>grades both present?"}
+    ACT -- "yes" --> AUC["remission_vs_active_auc<br/>from P of grade 2 or 3"]
+    QWK --> R[/"report"/]
+    F1 --> R
+    REC --> R
+    ECE --> R
+    AUC --> R
+    R --> CARD[/"result.json and model_card.md"/]
+```
 
 | Metric | Definition |
 |---|---|
@@ -376,6 +637,23 @@ colongrade predict runs/features-ordinal_none data/LIMUC/test_set/.../image.bmp
 
 `python -m colongrade` is the same as the `colongrade` command. `predict` prints a research output with a note that it is not a diagnosis.
 
+The diagram shows the order of the commands and the files that connect them.
+
+```mermaid
+flowchart LR
+    INS["pip install -e .[dev]"] --> SYN["colongrade synth"]
+    INS --> DL[/"LIMUC download,<br/>see data/README.md"/]
+    SYN --> IMG[("image folders<br/>default data/synthetic_limuc")]
+    DL --> IMG
+    IMG --> MAN["colongrade manifest root"]
+    MAN --> MS[("root/manifest.csv")]
+    MS --> TRN["colongrade train root"]
+    IMG --> TRN
+    TRN --> RUN[("runs/name/")]
+    RUN --> PRED["colongrade predict run image"]
+    INS --> DEMO["colongrade demo<br/>writes runs/demo"]
+```
+
 ### 10.4 Environment variables
 
 | Variable | Used by | Meaning |
@@ -384,10 +662,23 @@ colongrade predict runs/features-ordinal_none data/LIMUC/test_set/.../image.bmp
 | `COLONGRADE_OUT_DIR` | `train`, `demo` | Folder for the runs. Default `runs` |
 | `COLONGRADE_SEED` | All | Seed for folds, models and GAN. Default `13` |
 | `COLONGRADE_IMAGE_SIZE` | `train` | Square image size. Default `224` |
-| `COLONGRADE_FOLDS` | `manifest`, `train` | Number of cross-validation folds. Default `5` |
+| `COLONGRADE_FOLDS` | `manifest` | Number of cross-validation folds. Default `5`. `train` uses the folds in the manifest |
 | `COLONGRADE_DEVICE` | CNN, GAN | `auto`, `cpu` or `cuda`. Default `auto` |
 
 colongrade needs no credentials.
+
+```mermaid
+flowchart LR
+    ENV[/"process environment<br/>COLONGRADE_ variables"/] --> LS["load_settings"]
+    LS --> DEV{"DEVICE is auto,<br/>cpu or cuda?"}
+    DEV -- "no" --> ERR[/"ValueError"/]
+    DEV -- "yes" --> INT{"SEED at least 0, IMAGE_SIZE<br/>at least 16, FOLDS at least 2?"}
+    INT -- "no" --> ERR
+    INT -- "yes" --> SET[/"Settings"/]
+    SET --> AUTO{"device auto?"}
+    AUTO -- "yes" --> CUDA["cuda if torch finds a GPU,<br/>else cpu"]
+    AUTO -- "no" --> FIX["the given device"]
+```
 
 ---
 
